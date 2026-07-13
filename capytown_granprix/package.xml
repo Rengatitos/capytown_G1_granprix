@@ -1,0 +1,38 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>capytown_granprix</name>
+  <version>1.0.0</version>
+  <description>
+    Navegacion autonoma por seguimiento de pared derecha para el
+    laberinto Gran Prix CapyTown (Yahboom ROSMASTER R2 + Raspberry Pi 5,
+    ROS 2 Humble). Incluye lectura/segmentacion de LiDAR, control de
+    avance paralelo, maquina de estados de decision en intersecciones,
+    deteccion opcional de senales PARE por camara y registro de
+    metricas en CSV.
+  </description>
+  <maintainer email="fraydermezamorveli@gmail.com">frayderMM</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>capytown_interfaces</depend>
+
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

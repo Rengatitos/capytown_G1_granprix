@@ -1,0 +1,192 @@
+===============================================================================
+COMO SUBIR Y CORRER EL CODIGO EN EL ROBOT - CapyTown Gran Prix
+===============================================================================
+Estos pasos asumen: robot encendido, conectado a la misma red que tu
+PC (IP de la Pi: 10.42.0.1), y que ya se probo la conexion SSH antes
+(usuario "pi", NO "root").
+
+No se usa git en ningun paso de este flujo (instruccion explicita del
+proyecto). Todo es scp + colcon build dentro de un contenedor Docker.
+
+-------------------------------------------------------------------------------
+PASO 0 (una sola vez por sesion de pruebas): verificar que el driver
+base del robot ya este arriba
+-------------------------------------------------------------------------------
+Nuestro paquete (capytown_granprix) NO enciende el LiDAR, los motores,
+ni el puente micro-ROS -- eso lo hace el software base del robot, que
+normalmente ya deberia estar corriendo. Verificalo asi:
+
+  En la Pi (terminal normal, SIN entrar a ningun contenedor):
+    docker ps
+
+  Deberias ver (al menos) estos dos contenedores con estado "Up":
+    - capytown_dev              (nuestro entorno ROS2, donde compilamos)
+    - <nombre random> con imagen microros/micro-ros-agent:humble
+      (el puente motores/IMU/odometria)
+
+  Si capytown_dev NO aparece o dice "Exited":
+    docker start capytown_dev
+
+  Si el contenedor de micro-ros-agent no aparece, hay que arrancarlo
+  por separado (normalmente con un script como
+  ~/start_agent_rpi5.sh -- preguntar/revisar si no se sabe el comando
+  exacto, NO adivinar) antes de seguir.
+
+  Para confirmar que los topicos base ya existen, entra al contenedor
+  y lista los topicos:
+    docker exec -it capytown_dev bash
+    ros2 topic list
+
+  Deberias ver AL MENOS: /scan  /odom_raw  /cmd_vel  /imu
+  Si faltan, el problema esta en el driver base (fuera de este
+  paquete), no en nuestro codigo -- resolver eso primero.
+
+-------------------------------------------------------------------------------
+PASO 1: copiar el codigo actualizado del PC a la Pi
+-------------------------------------------------------------------------------
+Desde una terminal en tu PC (PowerShell), parado en la carpeta del
+proyecto (c:\Users\laboratorioesan\Documents\roboticafinal\roboticafinal):
+
+  ssh pi@10.42.0.1 "rm -rf /home/pi/yahboomcar_ws/src/capytown_granprix"
+  scp -r "c:\Users\laboratorioesan\Documents\roboticafinal\roboticafinal\capytown_granprix" pi@10.42.0.1:/home/pi/yahboomcar_ws/src/
+
+  (Si tambien cambiaste capytown_interfaces -- los mensajes custom --
+  repite el mismo patron con esa carpeta.)
+
+  El primer comando borra la copia anterior en la Pi ANTES de copiar
+  la nueva -- esto evita un bug real que ya paso varias veces: si la
+  carpeta destino ya existe, scp/cp puede crear una carpeta ANIDADA
+  (capytown_granprix/capytown_granprix/...) y colcon tira errores raros
+  de "Duplicate package names".
+
+  NOTA IMPORTANTE (descubierta esta sesion): el contenedor capytown_dev
+  tiene /root/yahboomcar_ws montado directo sobre /home/pi/yahboomcar_ws
+  de la Pi (son la MISMA carpeta fisica, un "bind mount"). Esto quiere
+  decir que en cuanto termina el scp de arriba, el codigo YA esta
+  visible dentro del contenedor -- NO hace falta ningun "docker cp"
+  adicional. Tampoco uses nunca
+  "docker exec capytown_dev rm -rf /root/yahboomcar_ws/..." pensando
+  que solo borra dentro del contenedor: por el bind mount, borra
+  tambien el original en la Pi.
+
+-------------------------------------------------------------------------------
+PASO 2: entrar al contenedor y compilar
+-------------------------------------------------------------------------------
+  ssh pi@10.42.0.1
+  docker exec -it capytown_dev bash
+
+Ya dentro del contenedor (el prompt cambia a algo como
+"root@raspberrypi:~#"):
+
+  cd /root/yahboomcar_ws
+  colcon build --packages-select capytown_granprix
+  source install/setup.bash
+
+  Si tocaste capytown_interfaces (mensajes custom), compila ambos:
+  colcon build --packages-select capytown_interfaces capytown_granprix
+
+  El warning de setuptools ("setup.py install is deprecated...") es
+  normal, no es un error. El warning de "FinalRengatitos does not
+  follow the naming conventions" es de OTRO paquete que ya estaba ahi,
+  ignoralo.
+
+  Si "colcon build" no encuentra el paquete ("ignoring unknown package
+  capytown_granprix"), lo mas probable es que el Paso 1 no se completo
+  bien -- confirma con "ls /root/yahboomcar_ws/src/capytown_granprix"
+  que los archivos SI estan ahi antes de compilar de nuevo.
+
+-------------------------------------------------------------------------------
+PASO 3A: correr la navegacion completa (el robot se MUEVE solo)
+-------------------------------------------------------------------------------
+Dentro del contenedor, con el workspace ya compilado y sourceado:
+
+  ros2 launch capytown_granprix granprix_bringup.launch.py ronda:=1
+
+  Esto levanta los 7 nodos del paquete (camara, LiDAR, seguimiento de
+  pared, maquina de estados, deteccion de PARE, metricas, dashboard
+  web) y el robot arranca: gira 90 grados a la izquierda y empieza a
+  explorar pegado a la pared izquierda.
+
+  Argumentos opcionales:
+    ronda:=2                 -> modo time attack (usa el mapa guardado
+                                 en la Ronda 1 si existe)
+    usar_camara:=false       -> desactiva SOLO la deteccion de PARE
+                                 (la camara y el dashboard siguen
+                                 activos igual)
+
+  Para ver el progreso en vivo (mapa, celda actual, camara, LiDAR),
+  abre en el navegador de tu PC (misma red que la Pi):
+    http://10.42.0.1:8000
+
+  PARA DETENER: Ctrl+C en esta misma terminal. Si el robot queda
+  moviendose y no responde rapido al Ctrl+C, en OTRA terminal dentro
+  del mismo contenedor:
+    ros2 topic pub -1 /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.0}, angular: {z: 0.0}}"
+
+-------------------------------------------------------------------------------
+PASO 3B (alternativa): solo ver el dashboard, SIN que el robot navegue
+-------------------------------------------------------------------------------
+Util para revisar que la camara/LiDAR se vean bien antes de una
+corrida real, sin arriesgar que el robot choque solo.
+
+  Terminal 1 (dentro del contenedor):
+    ros2 run capytown_granprix camera_publisher_node
+
+  Terminal 2 (otra pestana, "docker exec -it capytown_dev bash" de
+  nuevo):
+    ros2 run capytown_granprix dashboard_server_node
+
+  Luego abre http://10.42.0.1:8000 -- veras camara y LiDAR en vivo,
+  pero Celda/Heading/Estado FSM quedaran en "?" porque
+  state_machine_node no esta corriendo (a proposito, para que nada se
+  mueva).
+
+  IMPORTANTE: si despues quieres pasar al Paso 3A (launch completo),
+  primero mata estos dos procesos sueltos (Ctrl+C en cada terminal) --
+  el launch completo los vuelve a levantar y competirian por
+  /dev/video0 (la camara) y el puerto 8000.
+
+-------------------------------------------------------------------------------
+RESULTADOS DE LA CORRIDA
+-------------------------------------------------------------------------------
+Al llegar a META (o agotar el limite de celdas / hacer Ctrl+C), se
+escribe una fila en:
+  ~/capytown_resultados/metricas_granprix.csv   (dentro del contenedor,
+                                                   equivale a
+                                                   /root/capytown_resultados/...)
+Con: si llego a la meta, tiempo, distancia recorrida, colisiones,
+PARE detectados/respetados, etc.
+
+El mapa de intersecciones de la Ronda 1 (usado por la Ronda 2 para la
+ruta mas corta) se guarda en:
+  ~/capytown_resultados/mapa_granprix.json
+
+-------------------------------------------------------------------------------
+ERRORES YA VISTOS Y SU SOLUCION (para no perder tiempo re-diagnosticando)
+-------------------------------------------------------------------------------
+- "ros2: command not found" en la Pi -> estas fuera del contenedor.
+  Entra con "docker exec -it capytown_dev bash" primero.
+
+- "cp: cannot stat '/home/pi/...': No such file or directory" DENTRO
+  del contenedor -> /home/pi no existe dentro del contenedor (no esta
+  montado ahi). Usa /root/yahboomcar_ws dentro del contenedor, que YA
+  ES /home/pi/yahboomcar_ws de la Pi (bind mount, ver Paso 1).
+
+- "Couldn't parse params file... Will not support aliasing" al lanzar
+  -> el YAML de parametros (granprix_params.yaml) tiene anchors/alias
+  de YAML (&nombre / *nombre), que el parser de ROS2 NO soporta. Si
+  editas ese archivo, no uses esa sintaxis -- valores literales
+  duplicados nomas.
+
+- Un "ros2 run"/"ros2 launch" se queda pegado o el robot no se mueve
+  al arrancar en INICIO -> puede ser el retroceso-antes-de-girar
+  chocando contra una pared muy cerca en el punto donde se coloco el
+  robot a mano. El giro forzado inicial ya viene sin ese retroceso a
+  proposito -- si pasa en otro punto, revisar
+  tiempo_retroceso_giro_s/velocidad_retroceso_giro_mps en
+  config/granprix_params.yaml.
+
+- "Duplicate package names" o carpetas anidadas
+  (capytown_granprix/capytown_granprix/...) al compilar -> el scp/cp
+  copio DENTRO de una carpeta que ya existia. Siempre borrar el
+  destino antes de copiar (ver Paso 1).

@@ -1,0 +1,279 @@
+===============================================================================
+CONTEXTO DEL PROYECTO - CapyTown Gran Prix (Reto Final Robotica)
+===============================================================================
+Robot: Yahboom ROSMASTER R2 (chasis Ackermann, no rota en el sitio),
+       Raspberry Pi 5, ROS 2 Humble.
+Objetivo: recorrer un laberinto (rejilla 6 columnas A-F x 4 filas 1-4,
+       celdas de 60x60 cm) siguiendo la pared IZQUIERDA, detectar 3
+       senales PARE por camara (detenerse 3s), llegar de INICIO (A4)
+       a META (F1). Ronda 1 = exploracion reactiva + guarda un mapa de
+       intersecciones. Ronda 2 = time attack, puede reusar ese mapa
+       (BFS) para la ruta mas corta conocida.
+
+REGLA DURA DEL USUARIO: NO usar git para nada en este proyecto. Todo el
+flujo de trabajo es editar en el PC y subir al robot por scp + colcon
+build dentro de un contenedor Docker. No sugerir git, no usarlo.
+
+-------------------------------------------------------------------------------
+1. ARQUITECTURA (paquete capytown_granprix, ament_python)
+-------------------------------------------------------------------------------
+Nodos (todos se lanzan con granprix_bringup.launch.py):
+
+  camera_publisher_node  -> abre /dev/video0 con OpenCV, publica
+                             /camera/image_raw (bgr8, sin cv_bridge,
+                             sin GUI). SIEMPRE activo (no depende de
+                             usar_camara). Driver propio porque el
+                             script de demo de Yahboom para esta camara
+                             (yahboomcar_astra/colorHSV.py) usa
+                             cv_bridge (crashea, ver abajo) y ademas
+                             requiere ventana grafica (cv.imshow), no
+                             sirve por SSH sin X.
+
+  lidar_processor_node   -> lee /scan (LiDAR MS200), calcula zonas
+                             (front/right/left/right_front/right_rear/
+                             left_front/left_rear) y ajuste de recta
+                             por minimos cuadrados (right_line_*/
+                             left_line_*) -> publica /lidar_zones
+                             (capytown_interfaces/LidarZones).
+
+  wall_follower_node     -> control de seguimiento de pared (lado
+                             configurable, lado_seguimiento:
+                             IZQUIERDA) usando el ajuste de recta de
+                             /lidar_zones. Publica SUGERENCIA de
+                             velocidad en /wall_follow/cmd_vel_suggestion
+                             (NO publica directo a /cmd_vel).
+
+  state_machine_node     -> el "cerebro": maquina de estados de
+                             navegacion + decision en intersecciones.
+                             UNICO nodo que escribe en /cmd_vel.
+                             Tambien: dead-reckoning de celda/heading
+                             (GridTracker), mapa de intersecciones
+                             (MazeMap, para BFS de Ronda 2), eventos
+                             (/robot_event), estado (/robot_state),
+                             celda actual (/robot_cell), y
+                             visualizacion RViz (/trayectoria Path,
+                             /marcadores_granprix MarkerArray).
+
+  stop_sign_detector_node -> deteccion de PARE por color rojo (HSV) en
+                             /camera/image_raw -> /pare_detectado
+                             (bool). Se lanza solo si usar_camara:=true
+                             (default true).
+
+  metrics_logger_node    -> escucha /robot_event y /odom_raw, escribe
+                             una fila en
+                             ~/capytown_resultados/metricas_granprix.csv
+                             al llegar a META (o timeout).
+
+  dashboard_server_node  -> dashboard web local (puerto 8000, sin
+                             RViz/rosbridge): mapa descubierto,
+                             celda/heading/estado FSM, camara en vivo,
+                             puntos del LiDAR en vivo. SIEMPRE se
+                             levanta con el launch (no hace falta
+                             correrlo aparte).
+
+Maquina de estados (state_machine_node):
+  INICIAR -> (giro forzado 90 IZQUIERDA) -> PAUSA_GIRO -> GIRAR ->
+  ALINEAR -> VERIFICAR_META -> AVANZAR_PARALELO (avanza 60cm pegado a
+  la pared izquierda) -> DETECTAR_CRUCE (detenido, confirma
+  derecha/frente/izquierda libres con 5 muestras, consenso 3/5) ->
+  BUSCAR_PARE (si usar_camara) -> DECIDIR (regla de mano: IZQUIERDA >
+  FRENTE > DERECHA > ATRAS) -> PAUSA_GIRO -> GIRAR -> ALINEAR ->
+  VERIFICAR_META -> (META si llego, si no vuelve a AVANZAR_PARALELO).
+  DETENIDO es un estado de seguridad aparte (obstaculo frente/lado muy
+  cerca en AVANZAR_PARALELO).
+
+-------------------------------------------------------------------------------
+2. DECISIONES CLAVE Y POR QUE (para no repetir errores ya resueltos)
+-------------------------------------------------------------------------------
+- Seguimiento SOLO de la pared IZQUIERDA (lado_seguimiento: IZQUIERDA
+  en wall_follower Y en state_machine, deben coincidir). Pedido
+  explicito del usuario tras recomendacion externa: siguiendo la
+  izquierda se recorre el camino azul completo del laberinto oficial.
+
+- Primera accion SIEMPRE un giro forzado de 90 grados a la IZQUIERDA
+  en INICIO (angulo_giro_inicial_deg: 90.0), pedido explicito, fijo,
+  independiente del giro izquierdo "normal" en DECIDIR. Sin retroceso
+  antes de este giro especifico (_omitir_retroceso_giro=True) porque
+  el robot se coloca a mano en INICIO y no se sabe cuanto espacio
+  libre hay detras -- retroceder ahi causaba choques.
+
+- Giro IZQUIERDA en DECIDIR (el que se usa todo el tiempo durante la
+  exploracion reactiva) subido a 120 grados (angulo_giro_izquierda_deg)
+  porque en pista el giro quedaba corto del objetivo real con el mismo
+  valor que DERECHA (95 grados, ese si se mantiene en angulo_giro_deg,
+  fallback raro cuando izquierda Y frente estan bloqueados).
+
+- Control de seguimiento de pared: REGRESION DE LINEA (ajuste de recta
+  por minimos cuadrados a TODOS los puntos del lado, no solo 2 puntos)
+  -- mas robusto al ruido. distancia_objetivo_m = 0.12 m (12 cm,
+  validado en sim_local/ como el mejor margen sin choque). Angulo y
+  distancia se corrigen SUMADOS, no alternados (alternar crea
+  oscilacion que nunca se amortigua).
+
+- Chasis Ackermann: NO puede rotar en el sitio. Los giros son un arco
+  (linear.x + angular.z simultaneos) cerrado por yaw de odometria
+  (NO IMU -- se probo IMU dos veces para el giro, fallo las dos veces
+  en pista real -- error de 258.8 grados en un giro de 180 incluso
+  tras calibrar bias -- se revirtio a odometria por pedido explicito
+  del usuario "vuelve a odometria"). Correccion de escala del
+  odometro calibrada en pista: factor_dist_odom=0.9474,
+  factor_ang_odom=0.9899.
+
+- Retroceso corto ANTES de pivotar en cada giro normal
+  (tiempo_retroceso_giro_s/velocidad_retroceso_giro_mps): idea tomada
+  de un hallazgo real de otro grupo (Reto3_G1) -- girar pegado a una
+  esquina/pared hace que la parte trasera del chasis la roce sin que
+  el sensor frontal lo vea. Ayudo mucho a reducir choques post-giro.
+
+- umbral_colision_m (frente) = 0.18 m: subido de 0.10 tras un choque
+  de frente real (el LiDAR esta retrasado respecto al parachoques).
+
+- umbral_colision_lateral_m = 0.05 m (NUEVO esta sesion): igual que el
+  de frente pero para el LADO seguido de cerca. Antes SOLO se vigilaba
+  el frente para "choque" (regla de seguridad que corre solo en
+  AVANZAR_PARALELO) -- un obstaculo angosto lateral (media pared/panel
+  suelto) podia rozarse SIN disparar ningun evento COLISION (se
+  confirmo en pista real: 0 colisiones en las metricas pese a un
+  choque fisico visible contra un panel). Ahora se vigilan AMBOS.
+
+- Exploracion reactiva SIN memoria de celdas visitadas (revertido esta
+  sesion, ver seccion 4 mas abajo) -- regla de mano izquierda pura:
+  en cada cruce, prioridad estricta IZQUIERDA > FRENTE > DERECHA >
+  ATRAS (solo si las 3 estan bloqueadas). El usuario confirmo con un
+  trazado a mano sobre el diagrama oficial de la pista que este
+  laberinto NO tiene bolsillos cerrados -- seguir siempre la izquierda
+  alcanza para recorrerlo entero sin loops.
+
+- cv_bridge NO se usa en ningun nodo, a proposito: en este robot
+  especifico, instanciar CvBridge() produce segmentation fault
+  (desajuste entre la version compilada de cv_bridge y el
+  python3-opencv instalado, confirmado aislando el import). Toda
+  conversion sensor_msgs/Image <-> array de OpenCV se hace a mano con
+  numpy en capytown_granprix/image_codec.py (funciones imgmsg_to_bgr /
+  bgr_to_imgmsg), usado por camera_publisher_node,
+  stop_sign_detector_node y dashboard_server_node.
+
+- El camino REAL de la camara del robot es /image_raw (publicado por
+  yahboomcar_astra/colorHSV.py si se corre ese script de demo de
+  Yahboom) -- pero NO lo usamos, porque ese script requiere GUI y usa
+  cv_bridge. Nuestro camera_publisher_node abre la camara DIRECTO
+  (cv2.VideoCapture(0)) y publica en /camera/image_raw (el topic que
+  usan nuestros propios nodos), evitando ese script por completo.
+  IMPORTANTE: no correr colorHSV.py/colorTracker.py al mismo tiempo
+  que camera_publisher_node -- ambos abrenn /dev/video0 y competirian
+  por el mismo dispositivo.
+
+-------------------------------------------------------------------------------
+3. INFRAESTRUCTURA / DESPLIEGUE (hecho clave descubierto esta sesion)
+-------------------------------------------------------------------------------
+El contenedor Docker "capytown_dev" (imagen
+yahboomtechnology/ros-humble:4.1.0) tiene un BIND MOUNT:
+  Host (Pi):        /home/pi/yahboomcar_ws
+  Contenedor:        /root/yahboomcar_ws
+Son la MISMA carpeta fisica, no una copia. Confirmado con:
+  docker inspect capytown_dev --format '{{json .Mounts}}'
+(tambien tiene montados /dev/video0, /dev/input, /tmp/.X11-unix)
+
+Esto significa:
+  - NO hace falta "docker cp" para nada -- un scp a
+    /home/pi/yahboomcar_ws/src/<paquete> en la Pi YA es visible dentro
+    del contenedor en /root/yahboomcar_ws/src/<paquete> al instante.
+  - NUNCA correr "docker exec capytown_dev rm -rf /root/yahboomcar_ws/..."
+    pensando que solo afecta al contenedor -- borra tambien la copia
+    en la Pi (esto realmente paso en esta sesion y causo confusion:
+    un scp recien copiado desaparecio porque se borro "desde adentro
+    del contenedor" con esa ruta).
+
+El puente micro-ROS (motores/IMU/odometria) corre en OTRO contenedor
+Docker separado (imagen microros/micro-ros-agent:humble, modo serial),
+normalmente ya arriba de antes -- verificar con "docker ps" en la Pi.
+Cuando esta arriba, dentro de capytown_dev deberian existir los
+topicos /scan, /odom_raw, /cmd_vel, /imu (verificar con
+"ros2 topic list" DENTRO del contenedor -- el comando ros2 NO existe
+en la Pi directamente, solo dentro del contenedor).
+
+Usuario SSH de la Pi: pi (no root). IP de la Pi: 10.42.0.1.
+Contenedor de navegacion: capytown_dev.
+Ruta de trabajo ROS2 dentro del contenedor: /root/yahboomcar_ws
+(alias de /home/pi/yahboomcar_ws en la Pi via el bind mount).
+
+-------------------------------------------------------------------------------
+4. CAMBIOS DE ESTA SESION (los mas recientes primero)
+-------------------------------------------------------------------------------
+a) Revertida la "memoria de celdas visitadas" + BFS de escape de
+   bolsillos en state_machine_node.py::_handle_decidir. Se habia
+   agregado en una sesion anterior para evitar loops infinitos en OTRA
+   configuracion del laberinto que si tenia bolsillos cerrados. En
+   esta configuracion (confirmada por el usuario con un trazado a mano
+   sobre el diagrama oficial) NO hace falta -- causaba retrocesos
+   raros ("no esta haciendo, regresa a donde ya estuvo"). Se quito:
+   self._celdas_visitadas, _vecino_en_direccion(),
+   _heading_a_direccion_relativa(), y MazeMap.nearest_unvisited_heading()
+   (todo removido por quedar sin uso). _handle_decidir volvio a ser
+   pura regla de mano: IZQUIERDA > FRENTE > DERECHA > ATRAS.
+   NOTA: MazeMap SIGUE existiendo y grabando el mapa (record()) porque
+   lo sigue usando la Ronda 2 (shortest_headings/BFS para la ruta mas
+   corta CONOCIDA) -- eso no se toco.
+
+b) Deteccion de colision LATERAL agregada (antes solo frente):
+   nuevo parametro umbral_colision_lateral_m (0.05 m) en
+   state_machine_node.py::_handle_obstaculo_frente (ahora vigila
+   z.front < umbral_colision_m O z.left/right (segun lado_seguimiento)
+   < umbral_colision_lateral_m). Motivado por un choque real contra un
+   panel lateral angosto que las metricas no registraron (0
+   colisiones) porque solo se vigilaba el frente.
+
+c) Angulos de giro separados: angulo_giro_deg (95, DERECHA, fallback
+   raro), angulo_giro_izquierda_deg (120, IZQUIERDA, el que se usa
+   todo el tiempo), angulo_giro_inicial_deg (90, fijo, SOLO el giro
+   forzado de INICIO). _compute_turn_target() ahora acepta un
+   angulo_rad opcional para poder pasar el fijo de INICIO sin afectar
+   el de DECIDIR.
+
+d) camera_publisher_node.py (nuevo): driver propio de camara, sin
+   cv_bridge, sin GUI. Ver seccion 2 arriba (por que hizo falta).
+
+e) image_codec.py (nuevo): funciones imgmsg_to_bgr/bgr_to_imgmsg
+   compartidas, antes duplicadas en stop_sign_detector_node.py y
+   dashboard_server_node.py.
+
+f) granprix_bringup.launch.py: ahora lanza TAMBIEN camera_publisher_node
+   (siempre) y dashboard_server_node (siempre) -- antes habia que
+   correr el dashboard aparte con "ros2 run".
+
+g) granprix_params.yaml: nuevas secciones camera_publisher y
+   dashboard_server. IMPORTANTE -- el parser YAML de ROS2
+   (rcl_yaml_param_parser) NO SOPORTA anchors/aliases de YAML (&/*) --
+   se intento usarlos para no duplicar front_offset_deg/
+   invert_left_right/mapa_path entre lidar_processor/state_machine y
+   dashboard_server, fallo con "Will not support aliasing at line X" y
+   tumbaba TODOS los nodos al lanzar. Se revirtio a valores literales
+   duplicados (con comentario explicando que hay que mantenerlos
+   sincronizados a mano si se recalibra).
+
+h) setup.py: agregado el entry point camera_publisher_node.
+
+i) package.xml: removido <exec_depend>cv_bridge</exec_depend> (de una
+   sesion anterior, cv_bridge no se usa en absoluto en este proyecto).
+
+-------------------------------------------------------------------------------
+5. ESTADO ACTUAL / PROXIMO PASO
+-------------------------------------------------------------------------------
+Todo el codigo compila (python -m py_compile limpio) y el YAML es
+valido. Falta: correr una Ronda 1 completa con la regla de mano
+izquierda pura (sin memoria de visitadas) + deteccion de colision
+lateral, y ver si el robot ahora si completa el recorrido sin quedar
+en loop y sin chocar contra los paneles delgados ("medias paredes")
+que se vieron en la foto de la pista real. Ver el archivo
+COMO_CORRER.txt para los pasos exactos de despliegue y ejecucion.
+
+Nota tecnica pendiente de verificar en pista: durante el diagnostico
+del loop anterior se encontraron LECTURAS CONTRADICTORIAS del LiDAR
+para la MISMA abertura fisica segun desde que celda/angulo se mide
+(ej. C3 la lee abierta hacia B3, pero B3 la lee cerrada hacia C3) --
+esto sugiere que el punto exacto donde el robot se detiene en cada
+cruce no siempre queda bien alineado con aberturas angostas. Si sigue
+habiendo falsos "bloqueado" en paredes que en realidad estan abiertas,
+el siguiente paso seria revisar la precision de parada en
+DETECTAR_CRUCE o ensanchar aun mas las ventanas angulares de deteccion
+en esa zona especifica.

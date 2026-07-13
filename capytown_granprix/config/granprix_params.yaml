@@ -1,0 +1,420 @@
+# Parametros del Reto Final - Gran Prix CapyTown
+# Yahboom ROSMASTER R2 (Raspberry Pi 5) - ROS 2 Humble
+#
+# Editar SIEMPRE en el PC (nunca en el robot), luego commit + push +
+# pull en el robot (ver FLUJO_DE_TRABAJO.md y README.md, seccion
+# Calibracion).
+
+lidar_processor:
+  ros__parameters:
+    scan_topic: /scan
+    output_topic: /lidar_zones
+
+    # --- Calibracion de montaje del LiDAR ---
+    # HISTORIAL (notas de sesiones anteriores, no confiar sin re-
+    # verificar -- ver nota de calibracion actual abajo):
+    # offset=0/invert=false -> frente mostraba lo que era atras.
+    # offset=180/invert=false -> estatico parecia bien, pero en
+    #   movimiento seguia la pared izquierda.
+    # offset=180/invert=true -> frente Y derecha quedaron AMBOS
+    #   invertidos a la vez (rotacion de 180 de mas).
+    # offset=0/invert=true -> izquierda/derecha quedaron BIEN, pero
+    #   frente/atras siguieron invertidos.
+    #
+    # CALIBRACION ACTUAL (verificada en pista con lidar_zones_text.py,
+    # tocando cada lado FISICO contra una pared por separado, uno a la
+    # vez -- la unica prueba confiable, ver README seccion 5.2):
+    # 1) offset=180/invert=false: FRENTE y ATRAS salieron CAMBIADOS (la
+    #    torreta -- frente real -- tocando la pared marcaba bajo en
+    #    ATRAS, no en FRENTE).
+    # 2) offset=0/invert=true: corrigio frente/atras, pero DERECHA e
+    #    IZQUIERDA quedaron cambiados (efecto secundario esperado: girar
+    #    180 el frente/atras tambien voltea izq/der, e invert_left_right
+    #    de mas volvio a voltearlos).
+    # 3) offset=0/invert=false: frente/atras se mantienen bien (invert
+    #    no los afecta, son simetricos) y esto corrige izq/der. Sin mas
+    #    lados por probar, esta es la calibracion vigente.
+    # Si vuelve a fallar algun lado, repetir la prueba de los 4 lados
+    # por separado -- no asumir por los valores "razonables" de un
+    # cuarto abierto, hay que tocar cada lado FISICO uno a la vez.
+    front_offset_deg: 0.0
+    invert_left_right: false
+
+    max_range_use_m: 4.0
+
+    # Ventanas angulares en el marco del ROBOT (0=frente,
+    # +90=izquierda, -90=derecha; ver logica_pared_derecha_robot.md
+    # seccion 10). Ajustar solo si el barrido del MS200 en este robot
+    # no corresponde a estos valores tras aplicar el offset/inversion.
+    #
+    # right_window_deg/left_window_deg ensanchadas de 40 a 70 grados
+    # (-125/-55 y 55/125): encontrado en pista con lado_seguimiento
+    # IZQUIERDA que DETECTAR_CRUCE declaraba "callejon sin salida" en
+    # mas de 1 de cada 3 intersecciones, con la MISMA celda dando
+    # izquierda_libre=False en una visita y (por otra ruta) confirmando
+    # que si habia paso. Causa: las muestras de DETECTAR_CRUCE se toman
+    # con el robot YA DETENIDO en un solo punto -- si ese punto no
+    # queda perfectamente alineado con la abertura de 60cm, el LiDAR la
+    # ve en angulo oblicuo y la lectura sale corta. Afecta mas al lado
+    # que se sigue de cerca (detectar una apertura en la MISMA pared
+    # que se esta pegando a 12cm es geometricamente mas dificil que en
+    # el lado opuesto). Una ventana mas ancha da mas margen para
+    # capturar la apertura aunque el punto de parada no sea perfecto.
+    front_window_deg: [-15.0, 15.0]
+    right_front_window_deg: [-75.0, -45.0]   # S1 (usado por ALINEAR)
+    right_window_deg: [-125.0, -55.0]
+    right_rear_window_deg: [-135.0, -105.0]  # S2 (usado por ALINEAR)
+    left_window_deg: [55.0, 125.0]
+    left_front_window_deg: [45.0, 75.0]      # S1 izquierdo, espejo de right_front (ALINEAR con lado_seguimiento: IZQUIERDA)
+    left_rear_window_deg: [105.0, 135.0]     # S2 izquierdo, espejo de right_rear
+
+    # Ventana para el ajuste de RECTA (regresion) del lado derecho,
+    # usado por wall_follower_node como metodo principal de seguimiento
+    # (mas robusto al ruido que S1/S2 sueltos). Se angosto de -135/-45
+    # a -110/-70: una ventana mas ancha alcanza mas lejos hacia
+    # adelante/atras y cerca de una esquina (pared perpendicular) puede
+    # agarrar puntos de esa otra pared, sesgando el angulo hasta ~37
+    # grados falsos -- confirmado con una esquina real en sim_local/.
+    right_side_window_deg: [-110.0, -70.0]
+    left_side_window_deg: [70.0, 110.0]      # espejo de right_side_window_deg
+    min_puntos_linea: 6
+    # Rechazo iterativo de outliers en el ajuste de recta (puntos que
+    # no encajan bien, probablemente de otra superficie como una
+    # esquina): se descartan y se reajusta, hasta esta cantidad de
+    # veces. Segunda capa de defensa ademas de la ventana angosta.
+    outlier_max_iter: 3
+    outlier_residuo_m: 0.03
+
+wall_follower:
+  ros__parameters:
+    lidar_zones_topic: /lidar_zones
+    odom_topic: /odom_raw
+    output_topic: /wall_follow/cmd_vel_suggestion
+
+    # DERECHA o IZQUIERDA -- debe coincidir con el mismo parametro en
+    # state_machine (lado_seguimiento). Signos verificados en
+    # sim_local/ (run_sim_laberinto.py --lado IZQUIERDA --sin-graficos)
+    # con el laberinto completo real: control estable, sin divergencia
+    # -- aunque en esa simulacion (coordenadas de DETALLE_PISTA.md)
+    # ninguno de los dos lados cubre el laberinto completo por los
+    # loops del mapa (ver README). Puesto en IZQUIERDA a pedido, para
+    # probar en la pista fisica real (puede no ser identica al mapa
+    # de DETALLE_PISTA.md).
+    lado_seguimiento: IZQUIERDA
+
+    # Metodo de REGRESION DE LINEA (ajusta una recta a todos los puntos
+    # del lado derecho, no solo 2 -- ver right_side_window_deg arriba).
+    # Validado en sim_local/ con un barrido de parametros: 7 cm choca
+    # siempre en promedio (el robot mide 8 cm de medio-ancho); 12 cm da
+    # el mejor margen real sin choque (~2.5 cm minimo) con la menor
+    # oscilacion. Correccion CONTINUA hacia el objetivo (sin banda
+    # muerta) para mantener una distancia consistente. Angulo y
+    # distancia se corrigen SUMADOS (no alternados): alternar entre
+    # "solo angulo" y "solo distancia" crea una oscilacion que nunca
+    # se amortigua (verificado en sim_local/, ±1.4 cm indefinido).
+    distancia_objetivo_m: 0.12
+
+    velocidad_lineal_mps: 0.15
+    # ganancia_angulo ahora actua sobre RADIANES (angulo de la recta
+    # ajustada), no metros como el metodo viejo de 2 puntos -- escala
+    # totalmente distinta, no reusar el valor anterior (3.0) sin volver
+    # a calibrar. Signo verificado en sim_local/: con el signo
+    # equivocado el robot diverge en menos de 1 segundo.
+    ganancia_angulo: 2.0
+    ganancia_distancia: 2.0
+    # Kp de heading (yaw de /odom_raw) usado solo cuando no hay pared
+    # derecha de referencia, para mantener el rumbo recto en vez de
+    # dejar que un sesgo mecanico del chasis desvie al robot sin
+    # correccion.
+    ganancia_heading: 2.0
+    angular_max_radps: 0.6
+
+    # Si se pierde la pared derecha y la ultima distancia valida
+    # conocida era menor a esto, se asume "pared demasiado cerca para
+    # medir" (el LiDAR tiene un rango minimo, ~3 cm) y se gira
+    # activamente lejos, en vez de mantener rumbo como con un pasillo
+    # genuinamente abierto. Ver nota larga en wall_follower_node.py.
+    umbral_muy_cerca_m: 0.06
+
+    # Si el frente esta mas cerca que esto, no avanzar aunque el
+    # estado siga siendo AVANZAR_PARALELO (seguridad redundante).
+    frente_minimo_seguro_m: 0.15
+
+    # --- Modo de prueba: SOLO para calibrar el seguimiento recto ---
+    # Si es true, ademas de la sugerencia normal, publica el mismo
+    # comando directo en cmd_vel_topic. Permite correr unicamente
+    # lidar_processor_node + wall_follower_node (sin state_machine) en
+    # un pasillo largo, para ver el seguimiento continuo puro sin las
+    # fases de celda/cruce/giro. NO activar junto con state_machine_node.
+    cmd_vel_topic: /cmd_vel
+    publicar_directo_en_cmd_vel: false
+
+state_machine:
+  ros__parameters:
+    lidar_zones_topic: /lidar_zones
+    odom_topic: /odom_raw
+    cmd_vel_topic: /cmd_vel
+    wall_follow_topic: /wall_follow/cmd_vel_suggestion
+    pare_topic: /pare_detectado
+    event_topic: /robot_event
+    robot_state_topic: /robot_state
+    cell_topic: /robot_cell
+
+    # --- Visualizacion RViz (trayectoria + marcadores de intersecciones/PARE) ---
+    path_topic: /trayectoria
+    markers_topic: /marcadores_granprix
+    path_min_dist_m: 0.02
+
+    usar_camara: true
+    control_rate_hz: 20.0
+
+    # Debe coincidir con el mismo parametro en wall_follower -- ver nota
+    # ahi. Cambia la prioridad de giro en DECIDIR y la referencia de
+    # ALINEAR (right_front/right_rear vs left_front/left_rear).
+    lado_seguimiento: IZQUIERDA
+
+    # Modo de prueba: salta DETECTAR_CRUCE, BUSCAR_PARE, ALINEAR y
+    # VERIFICAR_META -- queda solo AVANZAR_PARALELO <-> GIRAR, con una
+    # sola lectura (sin confirmar con varias muestras) para decidir.
+    # Util para calibrar el giro de 90 grados aislado del resto de la
+    # logica de intersecciones. false para la corrida real (activa
+    # BUSCAR_PARE / fusion con camara, exigida por el reto).
+    modo_simplificado: false
+
+    # --- Correccion de escala del odometro (calibrado en pista) ---
+    # El ROSMASTER R2 sobreestima distancia y angulo de forma consistente.
+    # Medido: avance real 76 cm -> odometro 78.3 cm (factor ~0.9706,
+    # redondeado a 0.9474 tras varias pruebas); giro real 90 grados ->
+    # odometro 90.92 grados (factor 90/90.92 = 0.9899).
+    factor_dist_odom: 0.9474
+    factor_ang_odom: 0.9899
+
+    # --- Umbrales de deteccion (logica_pared_derecha_robot.md, seccion 11) ---
+    # umbral_frente_pared_m subido de 0.25 a 0.30: en sim_local (esquina
+    # de fondo ciego que gira a la izquierda, ver
+    # sim_local/environment.py::pasillo_frente_bloqueado_gira_izquierda,
+    # pista de 3 celdas) con 0.25 el margen real hasta la pared durante
+    # el giro era de solo 0.8 cm -- barrido de parametros encontro que
+    # subiendo este umbral y velocidad_giro_angular_radps (ver abajo) el
+    # margen sube a ~4.7 cm sin tocar distancia_objetivo_m (ya validado
+    # para el seguimiento recto).
+    umbral_frente_pared_m: 0.30    # pared al frente: detener avance
+    umbral_frente_libre_m: 0.35    # frente libre para avanzar/decidir
+    # Bajado de 0.40 a 0.35: junto con las ventanas mas anchas de
+    # right_window_deg/left_window_deg arriba, da mas margen para una
+    # lectura oblicua de una abertura real de 60cm cuando el punto de
+    # parada de DETECTAR_CRUCE no quedo perfectamente alineado con ella
+    # -- ver nota larga arriba (encontrado en pista, muchos falsos
+    # "callejon sin salida").
+    umbral_lado_libre_m: 0.35      # camino lateral libre (derecha/izquierda)
+
+    # Regla general de seguridad (siempre activa, en cualquier estado):
+    # objeto al frente mas cerca que esto -> detenerse de inmediato,
+    # esperar y volver a preguntar si esta libre (se repite en bucle
+    # mientras siga bloqueado).
+    # IMPORTANTE: esta es la distancia del LiDAR a la pared, no del
+    # borde fisico del robot -- si el LiDAR esta retrasado respecto al
+    # parachoques delantero (no montado justo en el borde), hay que
+    # sumar ese offset aqui o el robot choca antes de que se dispare
+    # esta alarma. Subido de 0.10 a 0.18 tras un choque de frente real
+    # en pista (el robot iba derecho y toco la pared sin frenar a
+    # tiempo con 0.10) -- verificar con lidar_viz.py acercando el
+    # robot de frente a una pared real y midiendo a que lectura de
+    # /lidar_zones (campo front) el parachoques recien toca, para
+    # calibrar el valor exacto en vez de este colchon conservador.
+    umbral_colision_m: 0.18
+    # Igual que umbral_colision_m pero para el LADO que se sigue de
+    # cerca (lado_seguimiento IZQUIERDA) -- objeto detectado a esta
+    # distancia mientras se avanza -> se trata como choque, aunque el
+    # frente este libre. Se agrego tras un choque real contra un panel
+    # angosto lateral ("media pared") que nunca disparo umbral_colision_m
+    # (0 colisiones en las metricas pese al choque fisico) -- ese umbral
+    # solo mira el frente. Mas ajustado que el objetivo normal de
+    # seguimiento (distancia_objetivo_m=0.12) para no disparar durante
+    # el seguimiento sano; verificar/recalibrar con lidar_viz.py igual
+    # que umbral_colision_m si sigue sin disparar a tiempo.
+    umbral_colision_lateral_m: 0.05
+    tiempo_espera_obstaculo_s: 2.0
+
+    # distancia_celda_m: 0.60 = una celda de la grilla real (rejilla 6x4
+    # de 60x60 cm). Para pruebas aisladas del giro en un pasillo largo
+    # sin intersecciones cada 60cm, se puede subir temporalmente, pero
+    # DEBE quedar en 0.60 para la corrida real en el laberinto -- con
+    # un valor mayor el robot nunca revisa las intersecciones dentro de
+    # un pasillo largo real.
+    distancia_celda_m: 0.60
+    margen_avance_m: 0.05          # se detiene en 0.55 m para no pasarse del cruce
+
+    # Confirmacion de lecturas en el cruce (evita falsos cruces por ruido).
+    # consenso_minimo bajado de 4 a 3: las 5 muestras se toman con el
+    # robot YA DETENIDO en un solo punto (no en movimiento), asi que no
+    # son realmente independientes -- si esa posicion da una lectura
+    # marginal de una abertura real, las 5 muestras tienden a salir
+    # parecidas entre si (todas un poco cortas), y exigir 4/5 descartaba
+    # aberturas reales por completo. 3/5 sigue filtrando ruido puntual
+    # sin ser tan estricto.
+    muestras_confirmacion: 5
+    consenso_minimo: 3
+
+    # --- Giro (chasis Ackermann: arco lento con cierre por yaw de odometria) ---
+    # Un chasis Ackermann tiene un RADIO DE GIRO MINIMO fijo (por el
+    # angulo maximo de las ruedas) -- no se puede seguir achicando el
+    # radio subiendo velocidad_giro_angular_radps sin limite. Se probo
+    # subir a 1.0 rad/s con 0.03 m/s y en pista el giro se volvio MAS
+    # lento e impreciso (probablemente saturando el angulo de direccion
+    # maximo del chasis a esa velocidad tan baja) -- revertido a los
+    # valores anteriores, que daban un giro mas predecible.
+    # Ver tiempo_retroceso_giro_s/velocidad_retroceso_giro_mps arriba
+    # para el problema real de colisiones justo despues de girar (ese
+    # si ayudo: retroceder antes de pivotar da margen sin depender de
+    # seguir achicando este radio).
+    velocidad_giro_lineal_mps: 0.05
+    velocidad_giro_angular_radps: 0.8
+    tolerancia_giro_deg: 4.0
+    # Angulo objetivo de giro DERECHA (fallback raro con
+    # lado_seguimiento IZQUIERDA -- solo se usa si izquierda Y frente
+    # estan bloqueados). Subido de 90 a 95: pedido para compensar que
+    # el arco Ackermann suele quedar corto del objetivo real. ATRAS
+    # sigue siendo 180 fijo, no usa esto.
+    angulo_giro_deg: 95.0
+    # Angulo objetivo de giro IZQUIERDA en DECIDIR -- el giro que de
+    # verdad se usa todo el tiempo con lado_seguimiento IZQUIERDA.
+    # Pedido explicitamente en ~120 (mas que angulo_giro_deg): en pista
+    # el giro izquierdo reactivo quedaba corto del objetivo real con el
+    # mismo valor que DERECHA.
+    angulo_giro_izquierda_deg: 120.0
+    # Angulo fijo del giro inicial forzado en INICIO -- pedido
+    # explicitamente como 90 grados, independiente de
+    # angulo_giro_izquierda_deg (no debe cambiar si se recalibra el
+    # giro reactivo normal).
+    angulo_giro_inicial_deg: 90.0
+    # Pausa fija con el robot detenido entre DECIDIR (ya sabe que va a
+    # girar) y el inicio del arco de GIRAR -- pedido para que el giro
+    # sea un movimiento claramente separado del avance.
+    tiempo_pausa_antes_girar_s: 1.0
+    # Retroceso corto al INICIO de esa pausa (incluido dentro de
+    # tiempo_pausa_antes_girar_s, no se suma aparte) para ganar margen
+    # antes de pivotar -- idea tomada de un hallazgo real de otro grupo
+    # (Reto3_G1): "si gira pegado a la pared/esquina, la parte trasera
+    # del chasis la roza, el sensor frontal no ve ese riesgo". Aplica
+    # igual con nuestro arco Ackermann: da mas espacio antes de que
+    # GIRAR empiece a avanzar hacia el nuevo tramo.
+    tiempo_retroceso_giro_s: 0.4
+    velocidad_retroceso_giro_mps: 0.05
+    # Limite duro de GIRAR: si la odometria no completa el angulo
+    # objetivo en este tiempo (falla de sensor, deriva severa, etc.),
+    # se fuerza a terminar el giro igual -- evita que quede girando sin
+    # parar. Con velocidad_giro_angular_radps=0.8, un giro de 95 grados
+    # tarda ~2s y uno de 180 (ATRAS) ~4s teoricos -- encontrado en pista
+    # que el valor anterior (6.0s) quedaba MUY justo para el ATRAS real
+    # (cortaba el giro a 1-5 grados de terminar), asi que se sube a 9s
+    # para dar margen real, no solo teorico.
+    tiempo_max_girar_s: 9.0
+
+    # --- Alineacion tras el giro ---
+    tolerancia_alineacion_m: 0.02
+    tiempo_max_alinear_s: 4.0
+    velocidad_alineacion_lineal_mps: 0.06
+    velocidad_alineacion_angular_radps: 0.3
+
+    # --- Senal de PARE ---
+    tiempo_pare_s: 3.0
+    tiempo_espera_camara_s: 0.5
+
+    # --- Mapa / meta (DETALLE_PISTA.md) ---
+    celda_inicio: A4
+    celda_meta: F1
+    heading_inicial: NORTE
+    max_celdas_recorridas: 60
+
+    # --- Memoria de ruta (Ronda 2) ---
+    # Ronda 1 SIEMPRE es reactiva (mano derecha, va por todos lados) y
+    # ademas va guardando en un archivo el mapa de intersecciones que
+    # confirma con el LiDAR. Si ronda=2 y usar_mapa_ronda2=true, al
+    # arrancar intenta cargar ese mapa y calcular con BFS la ruta mas
+    # corta CONOCIDA hasta la meta -- en cada interseccion, si lo
+    # planeado coincide con lo que el LiDAR ve en ese momento, gira
+    # directo sin evaluar mano derecha; si no coincide (pared nueva,
+    # error de mapa), descarta el plan para el resto de la corrida y
+    # sigue 100% reactivo, igual que Ronda 1.
+    # OJO: esto asume que el layout de paredes NO cambia entre rondas.
+    # El reto oficial SI permite reconfigurar paredes/PARE entre rondas
+    # -- si tu evaluacion lo hace, poner usar_mapa_ronda2 en false.
+    ronda: 1
+    usar_mapa_ronda2: true
+    mapa_path: "~/capytown_resultados/mapa_granprix.json"
+
+camera_publisher:
+  ros__parameters:
+    # Driver propio de la camara (ver camera_publisher_node.py): abre
+    # /dev/video<camera_index> directamente con OpenCV y publica sin
+    # cv_bridge ni GUI, para que la imagen este siempre disponible sin
+    # depender de lanzar aparte el script de demo de Yahboom
+    # (colorHSV.py, que ademas requiere pantalla y usa cv_bridge).
+    camera_index: 0
+    image_topic: /camera/image_raw
+    width: 640
+    height: 480
+    fps: 15.0
+
+dashboard_server:
+  ros__parameters:
+    # Se lanza siempre junto con la navegacion (granprix_bringup.launch.py)
+    # para poder ver en vivo por donde va el carro sin necesitar RViz.
+    puerto: 8000
+    cell_topic: /robot_cell
+    robot_state_topic: /robot_state
+    image_topic: /camera/image_raw
+    # Debe coincidir con state_machine.mapa_path de arriba -- el parser
+    # YAML de ROS2 (rcl_yaml_param_parser) NO soporta anchors/aliases
+    # (falla con "Will not support aliasing"), asi que hay que
+    # duplicar el valor a mano si se cambia.
+    mapa_path: "~/capytown_resultados/mapa_granprix.json"
+    scan_topic: /scan
+    # Debe coincidir con lidar_processor.front_offset_deg/
+    # invert_left_right de arriba -- mismo motivo, sin anchors. Si se
+    # recalibra el LiDAR, actualizar aca tambien.
+    front_offset_deg: 0.0
+    invert_left_right: false
+    lidar_max_range_m: 2.5
+    lidar_max_puntos: 500
+
+stop_sign_detector:
+  ros__parameters:
+    image_topic: /camera/image_raw
+    output_topic: /pare_detectado
+    debug_image_topic: /pare_detectado/debug_image
+    publicar_debug: false
+
+    # Segmentacion HSV de rojo (OpenCV: H en 0-179). El rojo cruza el
+    # 0, por eso se usan dos rangos.
+    rango1_min: [0, 120, 70]
+    rango1_max: [10, 255, 255]
+    rango2_min: [170, 120, 70]
+    rango2_max: [180, 255, 255]
+
+    area_minima_px: 800.0
+    area_maxima_px: 60000.0
+    relacion_aspecto_min: 0.6
+    relacion_aspecto_max: 1.4
+
+    frames_confirmacion: 3
+    frames_perdida: 5
+
+    roi_y_min_frac: 0.0
+    roi_y_max_frac: 1.0
+
+metrics_logger:
+  ros__parameters:
+    event_topic: /robot_event
+    odom_topic: /odom_raw
+    csv_path: "~/capytown_resultados/metricas_granprix.csv"
+
+    # 1 = ronda de exploracion, 2 = ronda time attack (ver DETALLE RETO 3.md)
+    ronda: 1
+    # Numero real de senales PARE en la pista (dato conocido de la
+    # competencia, no medido por el robot).
+    pare_reales: 3
+    # Longitud de la ruta mas corta conocida (ver DETALLE_PISTA.md,
+    # ruta sugerida A4-A3-A2-B2-C2-C1-D1-E1-F1 = 480 cm).
+    long_optima_cm: 480.0
