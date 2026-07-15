@@ -48,18 +48,18 @@ lidar_processor:
     # no corresponde a estos valores tras aplicar el offset/inversion.
     #
     # right_window_deg/left_window_deg ensanchadas de 40 a 70 grados
-    # (-125/-55 y 55/125): encontrado en pista con lado_seguimiento
-    # IZQUIERDA que DETECTAR_CRUCE declaraba "callejon sin salida" en
-    # mas de 1 de cada 3 intersecciones, con la MISMA celda dando
-    # izquierda_libre=False en una visita y (por otra ruta) confirmando
-    # que si habia paso. Causa: las muestras de DETECTAR_CRUCE se toman
-    # con el robot YA DETENIDO en un solo punto -- si ese punto no
-    # queda perfectamente alineado con la abertura de 60cm, el LiDAR la
-    # ve en angulo oblicuo y la lectura sale corta. Afecta mas al lado
-    # que se sigue de cerca (detectar una apertura en la MISMA pared
-    # que se esta pegando a 12cm es geometricamente mas dificil que en
-    # el lado opuesto). Una ventana mas ancha da mas margen para
-    # capturar la apertura aunque el punto de parada no sea perfecto.
+    # (-125/-55 y 55/125). Se probo subir a 80 grados (-130/-50 y
+    # 50/130) para corregir "callejones sin salida" falsos, pero se
+    # revirtio de inmediato: en pista real (misma pared que el diagrama
+    # oficial) causo el problema CONTRARIO -- el robot "vio" aberturas
+    # falsas donde en realidad hay pared solida (probablemente una
+    # pared ADYACENTE agarrada de refilon por la ventana demasiado
+    # ancha), llego a una "META" falsa saltandose la mayor parte del
+    # laberinto y las 3 senales PARE reales (pare_detectados=0 en esa
+    # corrida). 70 grados es el valor confirmado como buen equilibrio;
+    # si vuelve a haber "callejones sin salida" falsos, NO ensanchar
+    # mas esta ventana -- atacar el problema desde la precision del
+    # punto de parada en DETECTAR_CRUCE en su lugar (ver README).
     front_window_deg: [-15.0, 15.0]
     right_front_window_deg: [-75.0, -45.0]   # S1 (usado por ALINEAR)
     right_window_deg: [-125.0, -55.0]
@@ -156,6 +156,11 @@ state_machine:
     cmd_vel_topic: /cmd_vel
     wall_follow_topic: /wall_follow/cmd_vel_suggestion
     pare_topic: /pare_detectado
+    # Buzzer del robot -- confirmado que YB_Car_Node lo suscribe.
+    # Pitido "pi pi piiii" al detectar PARE (ver _emitir_pitido_pare en
+    # state_machine_node.py). Adaptado de una rama mas madura del mismo
+    # proyecto.
+    buzzer_topic: /beep
     event_topic: /robot_event
     robot_state_topic: /robot_state
     cell_topic: /robot_cell
@@ -200,12 +205,12 @@ state_machine:
     # para el seguimiento recto).
     umbral_frente_pared_m: 0.30    # pared al frente: detener avance
     umbral_frente_libre_m: 0.35    # frente libre para avanzar/decidir
-    # Bajado de 0.40 a 0.35: junto con las ventanas mas anchas de
-    # right_window_deg/left_window_deg arriba, da mas margen para una
-    # lectura oblicua de una abertura real de 60cm cuando el punto de
-    # parada de DETECTAR_CRUCE no quedo perfectamente alineado con ella
-    # -- ver nota larga arriba (encontrado en pista, muchos falsos
-    # "callejon sin salida").
+    # Bajado de 0.40 a 0.35. Se probo bajar a 0.30 en la misma sesion
+    # que se ensancharon las ventanas de right_window_deg/left_window_deg
+    # (ver nota larga arriba) para corregir "callejones sin salida"
+    # falsos -- se revirtio junto con esas ventanas por la misma razon:
+    # causo el problema contrario, aberturas falsas a traves de pared
+    # real. 0.35 es el valor confirmado como buen equilibrio.
     umbral_lado_libre_m: 0.35      # camino lateral libre (derecha/izquierda)
 
     # Regla general de seguridad (siempre activa, en cualquier estado):
@@ -229,12 +234,32 @@ state_machine:
     # frente este libre. Se agrego tras un choque real contra un panel
     # angosto lateral ("media pared") que nunca disparo umbral_colision_m
     # (0 colisiones en las metricas pese al choque fisico) -- ese umbral
-    # solo mira el frente. Mas ajustado que el objetivo normal de
-    # seguimiento (distancia_objetivo_m=0.12) para no disparar durante
-    # el seguimiento sano; verificar/recalibrar con lidar_viz.py igual
-    # que umbral_colision_m si sigue sin disparar a tiempo.
-    umbral_colision_lateral_m: 0.05
-    tiempo_espera_obstaculo_s: 2.0
+    # solo mira el frente.
+    # Subido de 0.05 a 0.11 (chasis nuevo, sesion de calibracion con
+    # lidar_zones_text.py y una caja de 30x30cm): el piso practico de
+    # lectura VALIDA de este LiDAR resulto ser ~0.12m -- por debajo de
+    # eso el campo pasa a invalido (z.left_valid/right_valid=False) en
+    # vez de reportar un numero chico. IMPORTANTE: este valor DEBE
+    # quedar por debajo de distancia_objetivo_m (0.12, en wall_follower)
+    # -- si quedara igual o mayor, la regla de "colision" se dispararia
+    # todo el tiempo durante el seguimiento sano (el robot esta a
+    # proposito a ~12cm de la pared todo el rato, cualquier ruido
+    # cruzaria un umbral de 0.12 constantemente). Con 0.11 esto solo
+    # atrapa una intrusion clara (algo que sobresale bastante mas de lo
+    # normal), no el roce normal contra la pared -- a cambio, como
+    # queda cerca del piso de 0.12m del sensor, puede no atrapar un
+    # choque justo en el limite del rango del LiDAR. Si en pista real
+    # sigue sin activarse a tiempo con una intrusion real, volver a
+    # medir el piso practico con lidar_zones_text.py contra una pared
+    # real (no una caja) y reconsiderar el compromiso.
+    umbral_colision_lateral_m: 0.11
+    # Bajado de 2.0 a 1.0 (misma sesion que el retroceso subido abajo):
+    # confirmado en pista un patron repetido (celdas angostas A3 y B2)
+    # de COLISION de frente justo al entrar a AVANZAR_PARALELO tras un
+    # giro, quedando parado ~10s en varios ciclos de esta espera antes
+    # de liberarse solo. No cambia el margen de seguridad (sigue
+    # revisando si esta libre), solo reintenta mas seguido.
+    tiempo_espera_obstaculo_s: 1.0
 
     # distancia_celda_m: 0.60 = una celda de la grilla real (rejilla 6x4
     # de 60x60 cm). Para pruebas aisladas del giro en un pasillo largo
@@ -244,6 +269,27 @@ state_machine:
     # un pasillo largo real.
     distancia_celda_m: 0.60
     margen_avance_m: 0.05          # se detiene en 0.55 m para no pasarse del cruce
+
+    # --- Chequeo periodico del lado seguido (ver _handle_chequeo_lado
+    # en state_machine_node.py) ---
+    # Cada este tanto de avance (mucho menos que distancia_celda_m,
+    # 0.60), se detiene y verifica con distancia PUNTUAL si el lado
+    # seguido se abrio -- en vez de solo confiar en que "avance 55cm,
+    # debo estar en un cruce" (la posicion por odometria puede no
+    # coincidir con la geometria fisica real de la pista, sobre todo
+    # en celdas angostas -- confirmado en pista real: la regla de mano
+    # pura quedaba dando vueltas entre las mismas celdas). Valores
+    # tomados de una rama mas madura del mismo proyecto
+    # (logica_dos_reglas) que ya habia resuelto ahi el mismo loop en
+    # espacios angostos con este mecanismo.
+    distancia_chequeo_pared_m: 0.12
+    tiempo_chequeo_pared_s: 0.5
+    # "Vacio" (lado seguido abierto) tiene que sostenerse esta cantidad
+    # de ciclos de control SEGUIDOS (a control_rate_hz=20Hz, no una
+    # sola lectura) antes de comprometerse a tratarlo como una
+    # interseccion real -- un giro es una decision cara de revertir.
+    # "Ocupado" no necesita esta confirmacion.
+    chequeo_pared_confirmaciones_ciclos: 5
 
     # Confirmacion de lecturas en el cruce (evita falsos cruces por ruido).
     # consenso_minimo bajado de 4 a 3: las 5 muestras se toman con el
@@ -291,7 +337,10 @@ state_machine:
     # Pausa fija con el robot detenido entre DECIDIR (ya sabe que va a
     # girar) y el inicio del arco de GIRAR -- pedido para que el giro
     # sea un movimiento claramente separado del avance.
-    tiempo_pausa_antes_girar_s: 1.0
+    # Subida de 1.0 a 1.1 junto con tiempo_retroceso_giro_s abajo --
+    # debe quedar SIEMPRE por encima de tiempo_retroceso_giro_s (el
+    # retroceso esta incluido dentro de esta pausa, no se suma aparte).
+    tiempo_pausa_antes_girar_s: 1.1
     # Retroceso corto al INICIO de esa pausa (incluido dentro de
     # tiempo_pausa_antes_girar_s, no se suma aparte) para ganar margen
     # antes de pivotar -- idea tomada de un hallazgo real de otro grupo
@@ -299,7 +348,13 @@ state_machine:
     # del chasis la roza, el sensor frontal no ve ese riesgo". Aplica
     # igual con nuestro arco Ackermann: da mas espacio antes de que
     # GIRAR empiece a avanzar hacia el nuevo tramo.
-    tiempo_retroceso_giro_s: 0.4
+    # Subido de 0.4 a 0.6, y ahora a 0.8 (misma velocidad): confirmado
+    # en pista, en DOS corridas distintas, el mismo patron de choque de
+    # frente (0.12m en A3, 0.16m en B2) justo al arrancar a avanzar tras
+    # un giro en una celda angosta -- el arco Ackermann corta la
+    # esquina y queda mas cerca de lo esperado de la nueva pared. El
+    # aumento anterior (0.6) no elimino el problema, se sube mas.
+    tiempo_retroceso_giro_s: 0.8
     velocidad_retroceso_giro_mps: 0.05
     # Limite duro de GIRAR: si la odometria no completa el angulo
     # objetivo en este tiempo (falla de sensor, deriva severa, etc.),
@@ -324,7 +379,20 @@ state_machine:
     # --- Mapa / meta (DETALLE_PISTA.md) ---
     celda_inicio: A4
     celda_meta: F1
-    heading_inicial: NORTE
+    # heading_inicial es la orientacion FISICA REAL del robot en INICIO,
+    # ANTES del giro forzado de _handle_iniciar (no la orientacion
+    # despues del giro) -- el robot se coloca a mano mirando al ESTE
+    # (confirmado por el usuario, ver flecha en el diagrama oficial de
+    # la pista) y el giro forzado IZQUIERDA lo deja mirando al NORTE
+    # (turn_left(ESTE) = NORTE), pegado a la pared izquierda. Con este
+    # valor mal puesto en NORTE (bug encontrado en pista), el
+    # GridTracker terminaba pensando que giraba hacia el OESTE en vez
+    # de NORTE tras el giro inicial, y el filtro de "fuera de rejilla"
+    # (_filtrar_fuera_de_rejilla) descartaba FRENTE e IZQUIERDA como si
+    # fueran a salirse del mapa nada mas terminar el giro -- causaba un
+    # "callejon sin salida" falso justo en INICIO sin importar lo que
+    # el LiDAR viera de verdad.
+    heading_inicial: ESTE
     max_celdas_recorridas: 60
 
     # --- Memoria de ruta (Ronda 2) ---
@@ -383,6 +451,7 @@ stop_sign_detector:
   ros__parameters:
     image_topic: /camera/image_raw
     output_topic: /pare_detectado
+    meta_output_topic: /meta_detectado
     debug_image_topic: /pare_detectado/debug_image
     publicar_debug: false
 
@@ -397,9 +466,33 @@ stop_sign_detector:
     area_maxima_px: 60000.0
     relacion_aspecto_min: 0.6
     relacion_aspecto_max: 1.4
+    # Solidez = area del blob / area de su convex hull -- descarta
+    # ruido disperso o reflejos alargados que no tienen forma solida
+    # de cartel. Adaptado de una rama mas madura del mismo proyecto.
+    solidez_minima: 0.75
+    # El PARE exige que su centro caiga en esta banda central
+    # horizontal del frame -- un cartel visto de refilon a un costado
+    # (que el robot no esta mirando de frente) no cuenta.
+    banda_central_frac: 0.20
 
     frames_confirmacion: 3
     frames_perdida: 5
+
+    # --- META por cartel verde (OPCIONAL, ver stop_sign_detector_node.py) ---
+    # Nuestro reto define META como llegar a la celda F1 por
+    # dead-reckoning (VERIFICAR_META en state_machine_node.py), no un
+    # cartel fisico -- dejar en false salvo que la pista real SI tenga
+    # un cartel META verde y quieras usarlo como confirmacion extra.
+    usar_meta_camara: false
+    meta_rango_min: [35, 40, 60]
+    meta_rango_max: [95, 255, 255]
+    meta_area_minima_px: 600.0
+    meta_area_maxima_px: 150000.0
+    meta_aspecto_min: 0.3
+    meta_aspecto_max: 3.0
+    meta_solidez_minima: 0.35
+    meta_frames_confirmacion: 3
+    meta_frames_perdida: 5
 
     roi_y_min_frac: 0.0
     roi_y_max_frac: 1.0
